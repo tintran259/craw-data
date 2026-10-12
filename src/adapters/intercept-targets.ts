@@ -1,0 +1,20 @@
+import { FACEBOOK_INTERCEPT_TARGETS } from './facebook/intercept-targets';
+import type { InterceptTarget } from './types';
+
+/**
+ * Endpoint mà interceptor (MAIN world) cần bắt. Tách riêng khỏi registry để bundle interceptor
+ * không kéo theo parser. Thêm nền tảng mới: thêm target của nó vào đây.
+ */
+export const ALL_INTERCEPT_TARGETS: InterceptTarget[] = [...FACEBOOK_INTERCEPT_TARGETS];
+
+export function matchesInterceptTarget(
+  url: URL,
+  targets: InterceptTarget[] = ALL_INTERCEPT_TARGETS,
+): boolean {
+  const host = url.hostname.toLowerCase();
+  return targets.some(
+    (t) =>
+      (host === t.hostSuffix || host.endsWith(`.${t.hostSuffix}`)) &&
+      t.pathPrefixes.some((p) => url.pathname.startsWith(p)),
+  );
+}

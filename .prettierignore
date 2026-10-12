@@ -1,0 +1,4 @@
+dist
+.wxt
+pnpm-lock.yaml
+src/**/__fixtures__

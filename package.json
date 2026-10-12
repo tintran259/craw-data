@@ -1,0 +1,44 @@
+{
+  "name": "social-comment-exporter",
+  "description": "Thu thập bình luận từ bài viết mạng xã hội và xuất Excel — chạy hoàn toàn trên trình duyệt.",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@wxt-dev/module-react": "^1.2.0",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.0.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "fake-indexeddb": "^6.0.0",
+    "globals": "^16.0.0",
+    "happy-dom": "^20.0.0",
+    "prettier": "^3.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "~5.9.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^5.0.4",
+    "wxt": "^0.20.0"
+  }
+}
