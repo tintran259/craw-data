@@ -32,6 +32,23 @@ export function serializeRequestBody(body: unknown): string | null {
   return null;
 }
 
+/** Chỉ giữ header `x-*` (tên viết thường) — đủ để gửi lại request giống trang. */
+export function pickRequestHeaders(headers: unknown): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  const add = (name: string, value: unknown) => {
+    const key = name.toLowerCase();
+    if (key.startsWith('x-') && typeof value === 'string') out[key] = value;
+  };
+  if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+    headers.forEach((value, name) => add(name, value));
+  } else if (Array.isArray(headers)) {
+    for (const pair of headers) if (Array.isArray(pair)) add(String(pair[0]), pair[1]);
+  } else if (headers && typeof headers === 'object') {
+    for (const [name, value] of Object.entries(headers)) add(name, value);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 export function installInterceptor(win: Window & typeof globalThis): void {
   const flagHost = win as unknown as Record<string, unknown>;
   if (flagHost[INSTALLED_FLAG]) return;
@@ -94,6 +111,7 @@ export function installInterceptor(win: Window & typeof globalThis): void {
     const patchedFetch = function (this: unknown, ...args: Parameters<typeof fetch>) {
       let target: string | null = null;
       let bodyPromise: Promise<string | null> = Promise.resolve(null);
+      let requestHeaders: Record<string, string> | null = null;
       if (state !== 'off') {
         try {
           const [input, init] = args;
@@ -101,6 +119,9 @@ export function installInterceptor(win: Window & typeof globalThis): void {
             typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
           target = targetUrl(rawUrl);
           if (target) {
+            requestHeaders = pickRequestHeaders(
+              init?.headers ?? (input instanceof Request ? input.headers : null),
+            );
             if (init && 'body' in init) {
               bodyPromise = Promise.resolve(serializeRequestBody(init.body));
             } else if (input instanceof Request) {
@@ -130,6 +151,7 @@ export function installInterceptor(win: Window & typeof globalThis): void {
                   emit({
                     requestUrl,
                     requestBody,
+                    requestHeaders,
                     status: response.status,
                     responseText,
                     capturedAt: new Date().toISOString(),
@@ -153,24 +175,40 @@ export function installInterceptor(win: Window & typeof globalThis): void {
   if (proto) {
     const originalOpen = proto.open;
     const originalSend = proto.send;
+    const originalSetHeader = proto.setRequestHeader;
     const targets = new WeakMap<XMLHttpRequest, string>();
+    const headers = new WeakMap<XMLHttpRequest, Record<string, string>>();
 
     proto.open = function (this: XMLHttpRequest, ...args: unknown[]) {
       try {
         const target = state === 'off' ? null : targetUrl(String(args[1]));
         if (target) targets.set(this, target);
         else targets.delete(this);
+        headers.delete(this);
       } catch {
         /* bỏ qua */
       }
       return Reflect.apply(originalOpen, this, args) as void;
     } as typeof proto.open;
 
+    proto.setRequestHeader = function (this: XMLHttpRequest, name: string, value: string) {
+      try {
+        if (targets.has(this)) {
+          const picked = pickRequestHeaders({ [name]: value });
+          if (picked) headers.set(this, { ...headers.get(this), ...picked });
+        }
+      } catch {
+        /* bỏ qua */
+      }
+      return Reflect.apply(originalSetHeader, this, [name, value]) as void;
+    };
+
     proto.send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
       const requestUrl = targets.get(this);
       if (requestUrl && state !== 'off') {
         try {
           const requestBody = serializeRequestBody(body);
+          const requestHeaders = headers.get(this) ?? null;
           this.addEventListener(
             'load',
             function (this: XMLHttpRequest) {
@@ -179,6 +217,7 @@ export function installInterceptor(win: Window & typeof globalThis): void {
                 emit({
                   requestUrl,
                   requestBody,
+                  requestHeaders,
                   status: this.status,
                   responseText: this.responseText,
                   capturedAt: new Date().toISOString(),

@@ -20,7 +20,15 @@ export default defineConfig({
       'Thu thập bình luận từ bài viết mạng xã hội và xuất Excel. Chạy hoàn toàn trên trình duyệt, không gửi dữ liệu ra ngoài.',
     minimum_chrome_version: '116',
     permissions: ['sidePanel', 'storage', 'tabs', 'scripting', 'downloads', 'alarms'],
-    host_permissions: ['https://*.facebook.com/*'],
+    host_permissions: [
+      'https://*.facebook.com/*',
+      'https://*.instagram.com/*',
+      'https://*.threads.com/*',
+      'https://*.threads.net/*',
+      'https://x.com/*',
+      'https://*.x.com/*',
+      'https://*.twitter.com/*',
+    ],
     action: {
       default_title: 'Mở Social Comment Exporter',
     },

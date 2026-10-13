@@ -20,26 +20,3 @@ export function mergeRecord(existing: CommentRecord, c: CommentRecord): CommentR
     createdAt: existing.createdAt ?? c.createdAt,
   };
 }
-
-/**
- * Gộp bản ghi mới vào map theo khóa `platform + commentId`.
- * Khi trùng, giữ bản cũ nhưng lấp các trường còn thiếu (null/rỗng) từ bản mới.
- * Trả về số bản ghi mới thực sự được thêm.
- */
-export function mergeComments(
-  target: Map<string, CommentRecord>,
-  incoming: CommentRecord[],
-): number {
-  let added = 0;
-  for (const c of incoming) {
-    const key = commentKey(c);
-    const existing = target.get(key);
-    if (!existing) {
-      target.set(key, c);
-      added++;
-      continue;
-    }
-    target.set(key, mergeRecord(existing, c));
-  }
-  return added;
-}

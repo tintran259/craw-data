@@ -1,1 +1,4 @@
 node_modules
+
+# File debug xuất từ extension: chứa tên và nội dung bình luận thật
+debug_*.json

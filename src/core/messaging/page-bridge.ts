@@ -9,6 +9,11 @@ export interface InterceptedResponse {
   requestUrl: string;
   /** Body request dạng text (form-urlencoded với Facebook). Không rời khỏi tab. */
   requestBody: string | null;
+  /**
+   * Header `x-*` của request (vd. x-csrftoken, x-ig-app-id) — để chế độ nhanh gửi lại giống hệt
+   * trang. Giống body: chỉ dùng trong tab, không gửi về background hay ghi vào debug.
+   */
+  requestHeaders: Record<string, string> | null;
   status: number;
   responseText: string;
   capturedAt: string;

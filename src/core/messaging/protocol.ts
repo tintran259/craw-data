@@ -1,14 +1,25 @@
 import type { BlockCode, CommentRecord, Platform } from '@/adapters/types';
 import type { QueueState } from '@/core/queue/types';
-import type { Settings } from '@/core/storage/settings';
+import type { ReplyDepth, Settings } from '@/core/storage/settings';
 import type { Range } from '@/shared/utils/delay';
+
+/** Cấu hình chế độ nhanh (gọi thẳng API phân trang — hiện chỉ Facebook). */
+export interface FastModeConfig {
+  apiDelayMs: Range;
+  replyLanes: number;
+  probeFeedLocation: boolean;
+}
 
 /** Cấu hình cho một lần thu thập bình luận trong tab. */
 export interface JobConfig {
   itemId: string;
   actionDelayMs: Range;
   idleStopMs: number;
-  includeReplies: boolean;
+  replyDepth: ReplyDepth;
+  /** null = tắt chế độ nhanh. */
+  fast: FastModeConfig | null;
+  /** Chỉ lấy bình luận mới hơn mốc này (giây Unix, theo lần chạy trước); null = lấy hết. */
+  onlyNewerThan: number | null;
 }
 
 /** Vai trò của một tab do extension mở. Tab không có mode thì content script đứng yên. */
@@ -78,10 +89,27 @@ export interface RequestMap {
   'queue/resume': { req: void; res: QueueState };
   'queue/cancel': { req: void; res: QueueState };
   'queue/clear': { req: void; res: QueueState };
-  'job/started': { req: { itemId: string }; res: void };
+  /** Chạy lại / chạy tiếp một bài đã lỗi hoặc bị hủy. */
+  'queue/retryItem': { req: { itemId: string }; res: QueueState };
+  /** Trả về trạng thái đã lưu của lần chạy trước (để chạy tiếp), nếu có. */
+  'job/started': { req: { itemId: string }; res: { resume: unknown } };
+  /** Lưu trạng thái để lần sau chạy tiếp. */
+  'job/checkpoint': { req: { itemId: string; state: unknown }; res: void };
+  /**
+   * Hẹn giờ ở background: timer trong tab bị Chrome kìm mạnh khi cửa sổ bị che / chạy nền lâu,
+   * còn phản hồi tin nhắn thì không.
+   */
+  'util/sleep': { req: { ms: number }; res: void };
   'job/comments': {
-    req: { itemId: string; records: CommentRecord[]; expectedTotal: number | null };
-    res: void;
+    req: {
+      itemId: string;
+      records: CommentRecord[];
+      expectedTotal: number | null;
+      /** Ghi chú trực tiếp (vd. số bình luận/trang Facebook cho); null = không đổi. */
+      note?: string | null;
+    };
+    /** `stop` = đã đủ số bình luận tối đa mỗi bài trong Cài đặt. */
+    res: { stop: boolean };
   };
   'job/finished': {
     req: {

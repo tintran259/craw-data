@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ITEM_STATUS_LABEL, type ItemStatus, type RunStatus } from '@/core/queue/types';
+import {
+  ITEM_STATUS_LABEL,
+  type ItemStatus,
+  type QueueItem,
+  type RunStatus,
+} from '@/core/queue/types';
+import { formatDisplayTime, formatDuration } from '@/shared/utils/time';
 import { usePanelStore } from '../store';
 import { PlatformBadge } from './PlatformBadge';
 import { card, danger, primary, secondary } from './ui';
@@ -8,7 +14,7 @@ const RUN_LABEL: Record<RunStatus, string> = {
   idle: 'Chưa chạy',
   running: 'Đang chạy',
   paused: 'Tạm dừng',
-  blocked: 'Bị Facebook hạn chế — đã dừng',
+  blocked: 'Bị nền tảng hạn chế — đã dừng',
   cancelled: 'Đã hủy',
   completed: 'Hoàn tất',
 };
@@ -31,9 +37,54 @@ function useNow(active: boolean): number {
   return now;
 }
 
-function formatWait(ms: number): string {
-  const s = Math.max(0, Math.ceil(ms / 1000));
-  return s >= 60 ? `${Math.floor(s / 60)} phút ${s % 60} giây` : `${s} giây`;
+/** Ghi chú nhiều dòng: dòng cảnh báo tô cam, dòng kích thước trang in đậm. */
+function NoteLines({ note }: { note: string }) {
+  return (
+    <div className="flex flex-col gap-0.5 pl-7">
+      {note.split('\n').map((line, i) => (
+        <p
+          key={i}
+          className={
+            line.startsWith('Số bình luận mỗi trang')
+              ? 'font-medium text-blue-700'
+              : NOTE_WARNING.test(line)
+                ? 'text-amber-700'
+                : 'text-slate-500'
+          }
+        >
+          {line}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/** Ghi chú có cảnh báo (bộ lọc chưa đúng, bị giới hạn, nút chưa nhận diện) thì tô màu cam. */
+const NOTE_WARNING = /có thể thiếu|giới hạn tạm thời|chưa nhận diện/;
+
+/**
+ * % đã lấy so với số FB hiển thị, chỉ khi bài đã kết thúc và thấp hơn 80%.
+ * (Số FB hiển thị thường gồm cả bình luận đã xóa/bị ẩn nên lệch ít là bình thường.)
+ */
+function lowCoverage(item: QueueItem): number | null {
+  if (!item.expectedTotal || (item.status !== 'done' && item.status !== 'error')) return null;
+  const ratio = (item.rootCount + item.replyCount) / item.expectedTotal;
+  return ratio < 0.8 ? Math.round(ratio * 1000) / 10 : null;
+}
+
+/** Bài lỗi / bị hủy giữa chừng có thể chạy lại (bài nền tảng chưa hỗ trợ thì không). */
+const canRetry = (item: QueueItem) =>
+  item.status === 'error' || (item.status === 'skipped' && item.error === 'Đã hủy');
+
+/** Thời gian chạy của một bài; bài đang chạy tính tới hiện tại. */
+function itemDuration(item: QueueItem, now: number): number | null {
+  if (!item.startedAt) return null;
+  const end = item.finishedAt
+    ? Date.parse(item.finishedAt)
+    : item.status === 'running'
+      ? now
+      : null;
+  return end === null ? null : end - Date.parse(item.startedAt);
 }
 
 export function QueuePanel() {
@@ -43,18 +94,20 @@ export function QueuePanel() {
   const resumeQueue = usePanelStore((s) => s.resumeQueue);
   const cancelQueue = usePanelStore((s) => s.cancelQueue);
   const clearQueue = usePanelStore((s) => s.clearQueue);
+  const retryItem = usePanelStore((s) => s.retryItem);
   const exportData = usePanelStore((s) => s.exportData);
-  const now = useNow(queue.nextRunAt !== null);
+  const active = ['running', 'paused', 'blocked'].includes(queue.status);
+  const now = useNow(active);
 
   if (!queue.items.length) return null;
 
-  const active = ['running', 'paused', 'blocked'].includes(queue.status);
   const counts = queue.items.reduce(
     (acc, i) => ({ ...acc, [i.status]: (acc[i.status] ?? 0) + 1 }),
     {} as Partial<Record<ItemStatus, number>>,
   );
   const totalComments = queue.items.reduce((s, i) => s + i.rootCount + i.replyCount, 0);
   const finished = (counts.done ?? 0) + (counts.error ?? 0) + (counts.skipped ?? 0);
+  const runningWindows = queue.workers.filter((w) => w.itemId).length;
 
   return (
     <section className={card}>
@@ -73,16 +126,23 @@ export function QueuePanel() {
         {finished}/{queue.items.length} link · {totalComments} bình luận
         {counts.error ? ` · ${counts.error} lỗi` : ''}
       </p>
+      {queue.startedAt !== null && (
+        <p className="text-xs text-slate-600">
+          Bắt đầu lúc {formatDisplayTime(new Date(queue.startedAt).toISOString())} · Tổng thời gian:{' '}
+          {formatDuration((queue.finishedAt ?? now) - queue.startedAt)}
+        </p>
+      )}
 
       {queue.status === 'running' && queue.waitReason && queue.nextRunAt && (
         <p className="text-xs text-slate-500">
-          {queue.waitReason}: bài tiếp theo sau {formatWait(queue.nextRunAt - now)}.
+          {queue.waitReason}: bài tiếp theo sau{' '}
+          {formatDuration(Math.ceil((queue.nextRunAt - now) / 1000) * 1000)}.
         </p>
       )}
-      {queue.status === 'running' && queue.currentItemId && (
+      {queue.status === 'running' && runningWindows > 0 && (
         <p className="text-xs text-slate-500">
-          Đang thu thập trong cửa sổ riêng. Đừng thu nhỏ hay đóng cửa sổ đó (có thể làm việc ở cửa
-          sổ khác).
+          Đang thu thập trong {runningWindows > 1 ? `${runningWindows} cửa sổ` : 'cửa sổ'} riêng.
+          Đừng thu nhỏ, che kín hay đóng các cửa sổ đó.
         </p>
       )}
       {queue.message && (
@@ -158,7 +218,35 @@ export function QueuePanel() {
               </span>
               {item.expectedTotal !== null && <span>FB hiển thị: {item.expectedTotal}</span>}
             </div>
+            {itemDuration(item, now) !== null && (
+              <div className="pl-7 text-slate-500">
+                Thời gian: {formatDuration(itemDuration(item, now)!)}
+              </div>
+            )}
             {item.error && <p className="pl-7 text-red-700">{item.error}</p>}
+            {lowCoverage(item) !== null && (
+              <p className="pl-7 text-amber-700">
+                Mới lấy được {lowCoverage(item)}% so với số FB hiển thị.
+              </p>
+            )}
+            {item.note && <NoteLines note={item.note} />}
+            {canRetry(item) && (
+              <div className="pl-7">
+                <button
+                  type="button"
+                  className={`${secondary} px-2 py-0.5`}
+                  disabled={busy}
+                  title={
+                    item.hasCheckpoint
+                      ? 'Tiếp tục từ chỗ dừng, giữ bình luận đã lấy'
+                      : 'Chạy lại bài này, giữ bình luận đã lấy'
+                  }
+                  onClick={() => void retryItem(item.id)}
+                >
+                  {item.hasCheckpoint ? 'Chạy tiếp' : 'Chạy lại'}
+                </button>
+              </div>
+            )}
           </li>
         ))}
       </ol>

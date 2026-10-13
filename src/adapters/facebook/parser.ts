@@ -1,5 +1,6 @@
 import type { CommentRecord, ParseContext } from '@/adapters/types';
-import { splitJsonPayload } from './payload-splitter';
+import { get, isObj, num, str, toIsoTime, walkJson, type Json } from '@/adapters/shared/json';
+import { splitJsonPayload } from '@/adapters/shared/payload-splitter';
 
 /**
  * Parser dựa trên cấu trúc thật quan sát được (xem __fixtures__):
@@ -11,35 +12,18 @@ import { splitJsonPayload } from './payload-splitter';
  * thay vì bám vào một đường dẫn cố định.
  */
 
-type Json = Record<string, unknown>;
-
-const isObj = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
-const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
-const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-const get = (o: unknown, ...path: string[]): unknown => {
-  let cur = o;
-  for (const key of path) {
-    if (!isObj(cur)) return undefined;
-    cur = cur[key];
-  }
-  return cur;
-};
-
 /** Các khóa trỏ ngược lên comment cha — không duyệt vào để tránh coi cha là con. */
 const BACKREF_KEYS = new Set(['comment_direct_parent', 'comment_parent', 'parent_object_ent']);
 
-function decodeBase64(value: string): string | null {
+/** `comment:POST_CID` hoặc `feedback:POST_CID` (base64) → `CID`. */
+export function decodeFbObjectId(id: string, prefix: 'comment' | 'feedback'): string | null {
+  let decoded: string;
   try {
-    return atob(value);
+    decoded = atob(id);
   } catch {
     return null;
   }
-}
-
-/** `comment:POST_CID` hoặc `feedback:POST_CID` (base64) → `CID`. */
-export function decodeFbObjectId(id: string, prefix: 'comment' | 'feedback'): string | null {
-  const decoded = decodeBase64(id);
-  if (!decoded?.startsWith(`${prefix}:`)) return null;
+  if (!decoded.startsWith(`${prefix}:`)) return null;
   const rest = decoded.slice(prefix.length + 1);
   const underscore = rest.lastIndexOf('_');
   return underscore >= 0 ? rest.slice(underscore + 1) || null : null;
@@ -62,16 +46,16 @@ function isFullComment(node: Json): boolean {
   );
 }
 
+const reactorsCount = (feedback: unknown) =>
+  num(get(feedback, 'reactors', 'count')) ?? num(get(feedback, 'unified_reactors', 'count'));
+
 function reactionCount(node: Json): number | null {
-  const direct =
-    num(get(node, 'feedback', 'reactors', 'count')) ??
-    num(get(node, 'feedback', 'unified_reactors', 'count'));
+  const direct = reactorsCount(node.feedback);
   if (direct !== null) return direct;
   const links = node.comment_action_links;
   if (Array.isArray(links)) {
     for (const link of links) {
-      const fb = get(link, 'comment', 'feedback');
-      const count = num(get(fb, 'reactors', 'count')) ?? num(get(fb, 'unified_reactors', 'count'));
+      const count = reactorsCount(get(link, 'comment', 'feedback'));
       if (count !== null) return count;
     }
   }
@@ -80,22 +64,14 @@ function reactionCount(node: Json): number | null {
   return reduced && /^\d+$/.test(reduced) ? Number(reduced) : null;
 }
 
-function replyCount(node: Json): number | null {
-  return (
-    num(get(node, 'feedback', 'replies_fields', 'total_count')) ??
-    num(get(node, 'feedback', 'replies_fields', 'count'))
-  );
-}
-
 function attachmentUrls(node: Json): string[] {
-  const out: string[] = [];
   const list = node.attachments;
-  if (!Array.isArray(list)) return out;
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
   for (const att of list) {
     const media = get(att, 'style_type_renderer', 'attachment', 'media') ?? get(att, 'media');
-    if (!isObj(media)) continue;
     // Bỏ ảnh xem trước của link chia sẻ (GenericAttachmentMedia) — không phải ảnh người dùng đính kèm.
-    if (media.__typename === 'GenericAttachmentMedia') continue;
+    if (!isObj(media) || media.__typename === 'GenericAttachmentMedia') continue;
     const uri =
       str(get(media, 'animated_image', 'uri')) ??
       str(get(media, 'image', 'uri')) ??
@@ -104,10 +80,6 @@ function attachmentUrls(node: Json): string[] {
     if (uri) out.push(uri);
   }
   return out;
-}
-
-function toIso(seconds: number | null): string | null {
-  return seconds === null ? null : new Date(seconds * 1000).toISOString();
 }
 
 function toRecord(
@@ -137,8 +109,10 @@ function toRecord(
     content: str(get(node, 'body', 'text')) ?? str(get(node, 'preferred_body', 'text')) ?? '',
     attachmentUrls: attachmentUrls(node),
     reactionCount: reactionCount(node),
-    replyCount: replyCount(node),
-    createdAt: toIso(num(node.created_time)),
+    replyCount:
+      num(get(node, 'feedback', 'replies_fields', 'total_count')) ??
+      num(get(node, 'feedback', 'replies_fields', 'count')),
+    createdAt: toIsoTime(num(node.created_time)),
     crawledAt: ctx.crawledAt,
   };
 }
@@ -160,44 +134,20 @@ function parentFromVariables(variables: string | null | undefined): string | nul
   return null;
 }
 
-export function extractCommentsFromJson(values: unknown[], ctx: ParseContext): CommentRecord[] {
-  const out: CommentRecord[] = [];
-  const fallbackParent = parentFromVariables(ctx.requestVariables);
-  const stack: { value: unknown; parent: string | null }[] = values.map((value) => ({
-    value,
-    parent: null,
-  }));
-  // Duyệt bằng stack thay vì đệ quy: payload Facebook có thể rất sâu.
-  while (stack.length) {
-    const { value, parent } = stack.pop()!;
-    if (Array.isArray(value)) {
-      for (let i = value.length - 1; i >= 0; i--) stack.push({ value: value[i], parent });
-      continue;
-    }
-    if (!isObj(value)) continue;
-    let childParent = parent;
-    if (isFullComment(value)) {
-      const record = toRecord(value, parent, fallbackParent, ctx);
-      if (record) {
-        out.push(record);
-        childParent = record.commentId;
-      }
-    }
-    const keys = Object.keys(value);
-    for (let i = keys.length - 1; i >= 0; i--) {
-      const key = keys[i]!;
-      if (BACKREF_KEYS.has(key)) continue;
-      const child = value[key];
-      if (typeof child === 'object' && child !== null)
-        stack.push({ value: child, parent: childParent });
-    }
-  }
-  return out;
-}
-
 export function parseFacebookPayload(raw: string, ctx: ParseContext): CommentRecord[] {
   if (!raw.includes('"Comment"')) return [];
-  return extractCommentsFromJson(splitJsonPayload(raw), ctx);
+  const out: CommentRecord[] = [];
+  const fallbackParent = parentFromVariables(ctx.requestVariables);
+  // `inherited` = id comment gần nhất phía trên (comment cha theo cấu trúc).
+  walkJson(splitJsonPayload(raw), ({ value, key, inherited }) => {
+    if (key && BACKREF_KEYS.has(key)) return false;
+    if (!isFullComment(value)) return undefined;
+    const record = toRecord(value, inherited, fallbackParent, ctx);
+    if (!record) return undefined;
+    out.push(record);
+    return record.commentId;
+  });
+  return out;
 }
 
 /**
@@ -207,29 +157,14 @@ export function parseFacebookPayload(raw: string, ctx: ParseContext): CommentRec
 export function extractFacebookTotalCount(raw: string): number | null {
   if (!raw.includes('"total_count"')) return null;
   let best: number | null = null;
-  const stack: { value: unknown; insideComment: boolean }[] = splitJsonPayload(raw).map(
-    (value) => ({
-      value,
-      insideComment: false,
-    }),
-  );
-  while (stack.length) {
-    const { value, insideComment } = stack.pop()!;
-    if (Array.isArray(value)) {
-      for (const v of value) stack.push({ value: v, insideComment });
-      continue;
-    }
-    if (!isObj(value)) continue;
-    const inside = insideComment || value.__typename === 'Comment';
+  walkJson(splitJsonPayload(raw), ({ value }) => {
+    if (value.__typename === 'Comment') return false; // danh sách reply bên trong comment
     const comments = value.comments;
-    if (!inside && isObj(comments) && Array.isArray(comments.edges)) {
+    if (isObj(comments) && Array.isArray(comments.edges)) {
       const total = num(comments.total_count) ?? num(comments.count);
       if (total !== null) best = Math.max(best ?? 0, total);
     }
-    for (const child of Object.values(value)) {
-      if (typeof child === 'object' && child !== null)
-        stack.push({ value: child, insideComment: inside });
-    }
-  }
+    return undefined;
+  });
   return best;
 }

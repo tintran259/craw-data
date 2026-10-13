@@ -1,10 +1,22 @@
+/** Kết quả lần tách gần nhất: cùng một response được parser, bộ đếm tổng và pager đọc lần lượt. */
+let lastRaw: string | null = null;
+let lastValues: unknown[] = [];
+
 /**
  * Tách một response thành các giá trị JSON. Xử lý được:
  * - tiền tố chống JSON hijacking `for (;;);`
  * - nhiều object JSON nối tiếp (mỗi dòng một object, hoặc dính liền nhau)
  * Phần không parse được bị bỏ qua, không throw.
+ * Kết quả được dùng chung giữa các lần gọi liên tiếp với cùng `raw` — chỉ đọc, không sửa.
  */
 export function splitJsonPayload(raw: string): unknown[] {
+  if (raw === lastRaw) return lastValues;
+  lastValues = splitUncached(raw);
+  lastRaw = raw;
+  return lastValues;
+}
+
+function splitUncached(raw: string): unknown[] {
   const text = raw.replace(/^\s*for\s*\(;;\);/, '');
   const out: unknown[] = [];
 

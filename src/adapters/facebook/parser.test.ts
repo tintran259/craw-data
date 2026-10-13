@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { mergeComments } from '@/core/dedupe';
+import { commentKey } from '@/core/dedupe';
 import type { CommentRecord, ParseContext } from '@/adapters/types';
-import { facebookInitialHtmlTotalCount, parseFacebookInitialHtml } from './initial-html';
+import { facebookAdapter } from './index';
 import { decodeFbObjectId, extractFacebookTotalCount, parseFacebookPayload } from './parser';
 
 const fixture = (name: string) => readFileSync(join(__dirname, '__fixtures__', name), 'utf8');
@@ -79,8 +79,7 @@ describe('parseFacebookPayload — JSON nhúng HTML thật (bài Page)', () => {
     script.type = 'application/json';
     script.textContent = raw;
     doc.body.append(script);
-    expect(parseFacebookInitialHtml(doc, ctx)).toHaveLength(10);
-    expect(facebookInitialHtmlTotalCount(doc, extractFacebookTotalCount)).toBe(248);
+    expect(facebookAdapter.parseInitialHtml(doc, ctx)).toHaveLength(10);
   });
 });
 
@@ -104,11 +103,11 @@ describe('parseFacebookPayload — response GraphQL (mẫu tổng hợp)', () =>
     expect(records[0]).toMatchObject({ commentId: '9003', parentId: '9001', depth: 1 });
   });
 
-  it('khử trùng lặp khi cùng comment xuất hiện ở nhiều response', () => {
-    const map = new Map<string, CommentRecord>();
-    mergeComments(map, parseFacebookPayload(fixture('pagination.synthetic.txt'), ctx));
-    mergeComments(map, parseFacebookPayload(fixture('pagination.synthetic.txt'), ctx));
-    expect(map.size).toBe(2);
+  it('cùng comment ở nhiều response cho cùng khóa (để khử trùng lặp)', () => {
+    const keys = (records: CommentRecord[]) => records.map(commentKey);
+    const first = parseFacebookPayload(fixture('pagination.synthetic.txt'), ctx);
+    const again = parseFacebookPayload(fixture('pagination.synthetic.txt'), ctx);
+    expect(new Set([...keys(first), ...keys(again)]).size).toBe(2);
   });
 
   it('bỏ qua payload không liên quan', () => {

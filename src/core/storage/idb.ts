@@ -1,11 +1,13 @@
 /** Wrapper IndexedDB tối giản. Dùng được ở cả service worker và side panel. */
 const DB_NAME = 'social-comment-exporter';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export const STORES = {
   debugSessions: 'debugSessions',
   debugPayloads: 'debugPayloads',
   comments: 'comments',
+  /** Trạng thái chế độ nhanh của từng bài (để "Chạy tiếp"). */
+  checkpoints: 'checkpoints',
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -28,6 +30,9 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORES.comments)) {
         const store = db.createObjectStore(STORES.comments, { keyPath: 'key' });
         store.createIndex('itemId', 'itemId');
+      }
+      if (!db.objectStoreNames.contains(STORES.checkpoints)) {
+        db.createObjectStore(STORES.checkpoints, { keyPath: 'itemId' });
       }
     };
     req.onsuccess = () => {

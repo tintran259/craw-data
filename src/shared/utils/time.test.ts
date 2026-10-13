@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fileTimestamp, formatDisplayTime } from './time';
+import { fileTimestamp, formatDisplayTime, formatDuration } from './time';
 
 describe('time', () => {
   it('fileTimestamp', () => {
@@ -11,5 +11,12 @@ describe('time', () => {
     );
     expect(formatDisplayTime(null)).toBe('');
     expect(formatDisplayTime('garbage')).toBe('');
+  });
+  it('formatDuration', () => {
+    expect(formatDuration(0)).toBe('0 giây');
+    expect(formatDuration(45_900)).toBe('45 giây');
+    expect(formatDuration(5 * 60_000 + 3000)).toBe('5 phút 3 giây');
+    expect(formatDuration(3600_000 + 3000)).toBe('1 giờ 0 phút 3 giây');
+    expect(formatDuration(-5)).toBe('0 giây');
   });
 });

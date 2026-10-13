@@ -8,6 +8,15 @@ export function fileTimestamp(date = new Date()): string {
   );
 }
 
+/** Khoảng thời gian dạng `1 giờ 2 phút 3 giây` (bỏ phần lẻ dưới 1 giây). */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const parts = [h && `${h} giờ`, (h || m) && `${m} phút`, `${s % 60} giây`];
+  return parts.filter(Boolean).join(' ');
+}
+
 /** `dd/MM/yyyy HH:mm:ss` theo giờ máy. Trả về chuỗi rỗng nếu không hợp lệ. */
 export function formatDisplayTime(iso: string | null): string {
   if (!iso) return '';

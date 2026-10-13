@@ -11,9 +11,16 @@ describe('registry', () => {
     expect(detectPlatform('https://example.com')).toBeNull();
   });
 
-  it('chỉ Facebook có adapter ở giai đoạn này', () => {
+  it('Facebook, Instagram, Threads, X có adapter; TikTok chưa', () => {
     expect(getAdapter('facebook')?.id).toBe('facebook');
-    expect(getAdapter('instagram')).toBeNull();
+    expect(getAdapter('instagram')?.id).toBe('instagram');
+    expect(getAdapter('threads')?.id).toBe('threads');
+    expect(getAdapter('x')?.id).toBe('x');
+    expect(getAdapter('tiktok')).toBeNull();
+    expect(findAdapterForUrl('https://www.instagram.com/reel/Cx1/')?.id).toBe('instagram');
+    expect(findAdapterForUrl('https://www.threads.net/@a/post/Cx1')?.id).toBe('threads');
+    expect(findAdapterForUrl('https://twitter.com/a/status/123')?.id).toBe('x');
+    expect(findAdapterForUrl('https://x.com/a')).toBeNull();
     expect(findAdapterForUrl('https://www.facebook.com/reel/1')?.id).toBe('facebook');
     expect(findAdapterForUrl('https://www.facebook.com/somepage')).toBeNull();
   });

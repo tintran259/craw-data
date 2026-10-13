@@ -6,7 +6,14 @@ import {
   unregisterCaptureScripts,
 } from '@/core/capture/register-scripts';
 import type { JobOutcome, TabMode } from '@/core/messaging/protocol';
+import {
+  clearCheckpoints,
+  deleteCheckpoint,
+  getCheckpoint,
+  saveCheckpoint,
+} from '@/core/storage/checkpoints';
 import { addComments, clearComments } from '@/core/storage/comments-db';
+import { getNewestCommentTime, recordNewestCommentTime } from '@/core/storage/post-history';
 import { getSettings, type Settings } from '@/core/storage/settings';
 import { hasAnyTabMode, removeTabMode, setTabMode } from '@/core/storage/tab-modes';
 import { randomBetween } from '@/shared/utils/delay';
@@ -14,24 +21,39 @@ import { createLogger } from '@/shared/utils/logger';
 import { parseLinkInput, unsupportedReason } from './links';
 import { nextAllowedByHourlyLimit, pruneHistory } from './rate-limit';
 import { loadQueue, saveQueue, withQueueLock } from './store';
-import { EMPTY_QUEUE, type QueueItem, type QueueState } from './types';
+import {
+  EMPTY_QUEUE,
+  type QueueItem,
+  type QueueState,
+  type ScreenArea,
+  type Worker,
+} from './types';
 
 const log = createLogger('queue');
 
 const ALARM_TICK = 'sce-queue-tick';
-const ALARM_TIMEOUT = 'sce-job-timeout';
-const ALARM_START_TIMEOUT = 'sce-job-start-timeout';
+/** Alarm theo từng bài (chạy song song nhiều bài): tên = tiền tố + id bài. */
+const ALARM_TIMEOUT = 'sce-job-timeout:';
+const ALARM_START_TIMEOUT = 'sce-job-start:';
 /** Không nhận được tín hiệu từ trang sau khoảng này thì coi như không tải được trang. */
 const START_TIMEOUT_MS = 90_000;
 /** chrome.alarms không cho đặt sớm hơn 30 giây. */
 const MIN_ALARM_MS = 30_000;
+/** Cửa sổ thu thập khi chạy từng bài một: đủ lớn để trang hiển thị đầy đủ. */
+const SINGLE_WINDOW = { width: 1200, height: 900 };
 
 const now = () => Date.now();
 const iso = () => new Date().toISOString();
+const ACTIVE = ['running', 'paused', 'blocked'];
 
-function current(state: QueueState): QueueItem | undefined {
-  return state.items.find((i) => i.id === state.currentItemId);
-}
+const itemById = (state: QueueState, id: string | null) =>
+  id ? state.items.find((i) => i.id === id) : undefined;
+
+/** Cửa sổ đang chạy đúng bài này trong đúng tab gửi tin nhắn. */
+const jobWorker = (state: QueueState, itemId: string, tabId: number | undefined) =>
+  tabId === undefined
+    ? undefined
+    : state.workers.find((w) => w.itemId === itemId && w.tabId === tabId);
 
 function scheduleTick(at: number): void {
   const delay = Math.max(0, at - now());
@@ -40,15 +62,14 @@ function scheduleTick(at: number): void {
   void browser.alarms.create(ALARM_TICK, { when: Math.max(at, now() + MIN_ALARM_MS) });
 }
 
-async function clearJobAlarms(): Promise<void> {
+async function clearJobAlarms(itemId: string): Promise<void> {
   await Promise.all([
-    browser.alarms.clear(ALARM_TIMEOUT),
-    browser.alarms.clear(ALARM_START_TIMEOUT),
+    browser.alarms.clear(ALARM_TIMEOUT + itemId),
+    browser.alarms.clear(ALARM_START_TIMEOUT + itemId),
   ]);
 }
 
-async function tabExists(tabId: number | null): Promise<boolean> {
-  if (tabId === null) return false;
+async function tabExists(tabId: number): Promise<boolean> {
   try {
     await browser.tabs.get(tabId);
     return true;
@@ -57,37 +78,72 @@ async function tabExists(tabId: number | null): Promise<boolean> {
   }
 }
 
-/** Cửa sổ riêng, đủ lớn: Facebook chỉ tải thêm khi trang thực sự hiển thị. */
-async function ensureWorkerTab(state: QueueState): Promise<number> {
-  if (await tabExists(state.workerTabId)) return state.workerTabId!;
+/** Vùng của cửa sổ trình duyệt đang dùng — các cửa sổ thu thập được xếp trong vùng này. */
+async function currentScreenArea(): Promise<ScreenArea | null> {
+  try {
+    const win = await browser.windows.getLastFocused({ windowTypes: ['normal'] });
+    if (!win.width || !win.height) return null;
+    return { left: win.left ?? 0, top: win.top ?? 0, width: win.width, height: win.height };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Vị trí cửa sổ thứ `slot` khi chạy `total` bài cùng lúc: chia đều vùng màn hình để các cửa sổ
+ * không che nhau (cửa sổ bị che hoàn toàn bị Chrome coi là ẩn và chạy chậm lại).
+ */
+export function windowBounds(
+  slot: number,
+  total: number,
+  area: ScreenArea | null,
+): { left?: number; top?: number; width: number; height: number } {
+  if (total <= 1 || !area) return SINGLE_WINDOW;
+  const cols = Math.min(total, 2);
+  const rows = Math.ceil(total / cols);
+  const width = Math.floor(area.width / cols);
+  const height = Math.floor(area.height / rows);
+  return {
+    left: area.left + (slot % cols) * width,
+    top: area.top + Math.floor(slot / cols) * height,
+    width,
+    height,
+  };
+}
+
+/** Cửa sổ rảnh còn mở, hoặc mở cửa sổ mới ở ô lưới còn trống. */
+async function idleWorker(state: QueueState, settings: Settings): Promise<Worker> {
+  for (const w of state.workers.filter((w) => !w.itemId)) {
+    if (await tabExists(w.tabId)) return w;
+    state.workers = state.workers.filter((x) => x !== w);
+  }
+  const used = new Set(state.workers.map((w) => w.slot));
+  let slot = 0;
+  while (used.has(slot)) slot++;
   const win = await browser.windows.create({
     url: 'about:blank',
     focused: true,
-    width: 1200,
-    height: 900,
     type: 'normal',
+    ...windowBounds(slot, settings.parallelPosts, state.area),
   });
   const tabId = win?.tabs?.[0]?.id;
   if (tabId === undefined || win?.id === undefined) {
     throw new Error('Không mở được cửa sổ thu thập.');
   }
-  state.workerTabId = tabId;
-  state.workerWindowId = win.id;
-  return tabId;
+  const worker: Worker = { tabId, windowId: win.id, slot, itemId: null, debugSessionId: null };
+  state.workers.push(worker);
+  return worker;
 }
 
-async function closeWorker(state: QueueState): Promise<void> {
-  const windowId = state.workerWindowId;
-  const tabId = state.workerTabId;
-  state.workerTabId = null;
-  state.workerWindowId = null;
+async function closeWorkers(state: QueueState): Promise<void> {
+  const workers = state.workers;
+  state.workers = [];
   // Ghi trước để sự kiện onRemoved sinh ra từ việc đóng không bị coi là người dùng đóng.
   await saveQueue(state);
-  try {
-    if (windowId !== null) await browser.windows.remove(windowId);
-    else if (tabId !== null) await browser.tabs.remove(tabId);
-  } catch {
-    /* đã đóng */
+  for (const w of workers) {
+    const close =
+      w.windowId >= 0 ? browser.windows.remove(w.windowId) : browser.tabs.remove(w.tabId);
+    await close.catch(() => {});
   }
 }
 
@@ -95,34 +151,48 @@ async function releaseScriptsIfIdle(): Promise<void> {
   if (!(await hasAnyTabMode())) await unregisterCaptureScripts();
 }
 
-/** Kết thúc bài đang chạy (dọn tab mode, alarm, phiên debug) và đặt lịch nghỉ. */
-async function endCurrent(
+/** Kết thúc bài trong một cửa sổ (dọn tab mode, alarm, phiên debug) và đặt lịch nghỉ. */
+async function endJob(
   state: QueueState,
+  worker: Worker,
   patch: Partial<QueueItem>,
   opts: { navigateAway: boolean; rest: Settings | null },
 ): Promise<void> {
-  const item = current(state);
-  if (item) Object.assign(item, { finishedAt: iso() }, patch);
-  state.currentItemId = null;
-  await clearJobAlarms();
-  if (state.workerTabId !== null) {
-    await removeTabMode(state.workerTabId);
-    if (opts.navigateAway) {
-      await browser.tabs.update(state.workerTabId, { url: 'about:blank' }).catch(() => {});
-    }
+  const item = itemById(state, worker.itemId);
+  if (item) {
+    Object.assign(item, { finishedAt: iso() }, patch);
+    await clearJobAlarms(item.id);
   }
-  if (state.currentDebugSessionId) {
-    await endDebugSession(state.currentDebugSessionId).catch(() => {});
-    state.currentDebugSessionId = null;
+  worker.itemId = null;
+  await removeTabMode(worker.tabId);
+  if (opts.navigateAway) {
+    await browser.tabs.update(worker.tabId, { url: 'about:blank' }).catch(() => {});
   }
-  if (opts.rest) state.nextRunAt = now() + randomBetween(opts.rest.postDelayMs);
+  if (worker.debugSessionId) {
+    await endDebugSession(worker.debugSessionId).catch(() => {});
+    worker.debugSessionId = null;
+  }
+  if (opts.rest) {
+    state.nextRunAt = Math.max(state.nextRunAt ?? 0, now() + randomBetween(opts.rest.postDelayMs));
+  }
+}
+
+/** Kết thúc mọi bài đang chạy (tạm dừng / hủy / bị chặn ở cửa sổ khác). */
+async function endAllJobs(
+  state: QueueState,
+  patch: Partial<QueueItem>,
+  opts: { navigateAway: boolean },
+): Promise<void> {
+  for (const w of state.workers) {
+    if (w.itemId) await endJob(state, w, patch, { ...opts, rest: null });
+  }
 }
 
 async function startItem(state: QueueState, item: QueueItem, settings: Settings): Promise<void> {
   await ensureCaptureScriptsRegistered();
-  const tabId = await ensureWorkerTab(state);
+  const worker = await idleWorker(state, settings);
   const debugSessionId = settings.debugMode
-    ? await createDebugSession(tabId, item.inputUrl, item.platform!)
+    ? await createDebugSession(worker.tabId, item.inputUrl, item.platform!)
     : null;
   const mode: TabMode = {
     platform: item.platform!,
@@ -133,11 +203,21 @@ async function startItem(state: QueueState, item: QueueItem, settings: Settings)
       itemId: item.id,
       actionDelayMs: settings.actionDelayMs,
       idleStopMs: settings.idleStopMs,
-      includeReplies: settings.includeReplies,
+      replyDepth: settings.replyDepth,
+      fast: settings.fastMode
+        ? {
+            apiDelayMs: settings.apiDelayMs,
+            replyLanes: settings.replyLanes,
+            probeFeedLocation: settings.probeFeedLocation,
+          }
+        : null,
+      onlyNewerThan: settings.onlyNewComments
+        ? await getNewestCommentTime(item.normalizedUrl)
+        : null,
     },
   };
   // Gán chế độ TRƯỚC khi điều hướng để content script của trang mới nhận đúng cấu hình.
-  await setTabMode(tabId, mode);
+  await setTabMode(worker.tabId, mode);
 
   const startedAt = now();
   Object.assign(item, {
@@ -145,37 +225,48 @@ async function startItem(state: QueueState, item: QueueItem, settings: Settings)
     startedAt: new Date(startedAt).toISOString(),
     finishedAt: null,
     error: null,
+    note: null,
     retryOnResume: false,
+    limitReached: false,
   } satisfies Partial<QueueItem>);
-  state.currentItemId = item.id;
-  state.currentDebugSessionId = debugSessionId;
+  worker.itemId = item.id;
+  worker.debugSessionId = debugSessionId;
   state.startHistory = [...pruneHistory(state.startHistory, startedAt), startedAt];
-  state.nextRunAt = null;
+  // Giãn cách các lần mở bài, kể cả khi chạy song song.
+  state.nextRunAt = startedAt + randomBetween(settings.postDelayMs);
   state.waitReason = null;
   await saveQueue(state);
 
-  await browser.tabs.update(tabId, { url: item.inputUrl });
-  await browser.alarms.create(ALARM_TIMEOUT, { when: startedAt + settings.postTimeoutMs });
-  await browser.alarms.create(ALARM_START_TIMEOUT, { when: startedAt + START_TIMEOUT_MS });
+  await browser.tabs.update(worker.tabId, { url: item.inputUrl });
+  await browser.alarms.create(ALARM_TIMEOUT + item.id, {
+    when: startedAt + settings.postTimeoutMs,
+  });
+  await browser.alarms.create(ALARM_START_TIMEOUT + item.id, {
+    when: startedAt + START_TIMEOUT_MS,
+  });
   log.info('Bắt đầu', item.inputUrl);
 }
 
 async function tickLocked(): Promise<void> {
   const state = await loadQueue();
-  if (state.status !== 'running' || state.currentItemId) return;
+  if (state.status !== 'running') return;
 
+  const busy = state.workers.filter((w) => w.itemId).length;
   const next = state.items.find((i) => i.status === 'pending');
   if (!next) {
+    if (busy) return; // chờ các bài đang chạy xong
     state.status = 'completed';
+    state.finishedAt = now();
     state.nextRunAt = null;
     state.waitReason = null;
-    await closeWorker(state);
+    await closeWorkers(state);
     await releaseScriptsIfIdle();
     await saveQueue(state);
     return;
   }
 
   const settings = await getSettings();
+  if (busy >= settings.parallelPosts) return;
   const t = now();
   const hourly = nextAllowedByHourlyLimit(state.startHistory, settings.maxPostsPerHour, t);
   const rest = state.nextRunAt ?? 0;
@@ -198,21 +289,17 @@ async function tickLocked(): Promise<void> {
     await startItem(state, next, settings);
   } catch (err) {
     log.error('Không bắt đầu được bài', err);
-    await endCurrent(
-      state,
-      { status: 'error', error: 'Không mở được bài viết trong cửa sổ thu thập.' },
-      { navigateAway: false, rest: null },
-    );
-    // Đảm bảo không kẹt ở trạng thái running nếu lỗi xảy ra trước khi gán currentItemId.
-    if (next.status === 'pending' || next.status === 'running') {
-      Object.assign(next, {
-        status: 'error',
-        error: 'Không mở được bài viết trong cửa sổ thu thập.',
-      });
+    const error = 'Không mở được bài viết trong cửa sổ thu thập.';
+    const worker = state.workers.find((w) => w.itemId === next.id);
+    if (worker) {
+      await endJob(state, worker, { status: 'error', error }, { navigateAway: false, rest: null });
+    } else {
+      Object.assign(next, { status: 'error', error });
     }
     await saveQueue(state);
-    scheduleTick(now() + 1000);
   }
+  // Còn chỗ chạy song song thì mở bài kế tiếp (sau khoảng nghỉ đã đặt).
+  scheduleTick(state.nextRunAt ?? now() + 1000);
 }
 
 export function tick(): Promise<void> {
@@ -226,12 +313,12 @@ export function getQueueState(): Promise<QueueState> {
 export function startQueue(urls: string[]): Promise<QueueState> {
   return withQueueLock(async () => {
     const old = await loadQueue();
-    if (['running', 'paused', 'blocked'].includes(old.status)) {
+    if (ACTIVE.includes(old.status)) {
       throw new Error('Hàng đợi hiện tại chưa kết thúc. Hãy Hủy trước khi chạy danh sách mới.');
     }
     const { links } = parseLinkInput(urls.join('\n'));
     if (!links.length) throw new Error('Không có link hợp lệ nào để chạy.');
-    await clearComments();
+    await Promise.all([clearComments(), clearCheckpoints()]);
     const items: QueueItem[] = links.map((l) => ({
       id: crypto.randomUUID(),
       inputUrl: l.inputUrl,
@@ -250,10 +337,11 @@ export function startQueue(urls: string[]): Promise<QueueState> {
       ...EMPTY_QUEUE,
       // Giữ lịch sử để giới hạn mỗi giờ vẫn đúng khi chạy nhiều danh sách liên tiếp.
       startHistory: pruneHistory(old.startHistory, now()),
-      workerTabId: old.workerTabId,
-      workerWindowId: old.workerWindowId,
+      workers: old.workers.map((w) => ({ ...w, itemId: null, debugSessionId: null })),
+      area: await currentScreenArea(),
       status: 'running',
       items,
+      startedAt: now(),
     };
     await saveQueue(state);
     scheduleTick(now());
@@ -265,14 +353,8 @@ export function pauseQueue(): Promise<QueueState> {
   return withQueueLock(async () => {
     const state = await loadQueue();
     if (state.status !== 'running') return state;
-    if (state.currentItemId) {
-      // Bài đang chạy quay về "Chờ"; bình luận đã thu vẫn giữ và sẽ được gộp khi chạy lại.
-      await endCurrent(
-        state,
-        { status: 'pending', finishedAt: null },
-        { navigateAway: true, rest: null },
-      );
-    }
+    // Bài đang chạy quay về "Chờ"; bình luận đã thu và checkpoint vẫn giữ để chạy tiếp.
+    await endAllJobs(state, { status: 'pending', finishedAt: null }, { navigateAway: true });
     state.status = 'paused';
     state.waitReason = null;
     return saveQueue(state);
@@ -290,6 +372,7 @@ export function resumeQueue(): Promise<QueueState> {
     state.status = 'running';
     state.message = null;
     state.nextRunAt = null;
+    state.area = (await currentScreenArea()) ?? state.area;
     await saveQueue(state);
     scheduleTick(now());
     return state;
@@ -299,22 +382,21 @@ export function resumeQueue(): Promise<QueueState> {
 export function cancelQueue(): Promise<QueueState> {
   return withQueueLock(async () => {
     const state = await loadQueue();
-    if (!['running', 'paused', 'blocked'].includes(state.status)) return state;
-    if (state.currentItemId) {
-      await endCurrent(
-        state,
-        { status: 'error', error: 'Đã hủy giữa chừng' },
-        { navigateAway: false, rest: null },
-      );
-    }
+    if (!ACTIVE.includes(state.status)) return state;
+    await endAllJobs(
+      state,
+      { status: 'error', error: 'Đã hủy giữa chừng' },
+      { navigateAway: false },
+    );
     for (const item of state.items) {
       if (item.status === 'pending') Object.assign(item, { status: 'skipped', error: 'Đã hủy' });
-      if (item.retryOnResume) item.retryOnResume = false;
+      item.retryOnResume = false;
     }
     state.status = 'cancelled';
+    state.finishedAt = now();
     state.nextRunAt = null;
     state.waitReason = null;
-    await closeWorker(state);
+    await closeWorkers(state);
     await releaseScriptsIfIdle();
     return saveQueue(state);
   });
@@ -323,23 +405,42 @@ export function cancelQueue(): Promise<QueueState> {
 export function clearQueue(): Promise<QueueState> {
   return withQueueLock(async () => {
     const state = await loadQueue();
-    if (['running', 'paused', 'blocked'].includes(state.status)) {
+    if (ACTIVE.includes(state.status)) {
       throw new Error('Hãy Hủy hàng đợi trước khi xóa dữ liệu.');
     }
-    await clearComments();
-    return saveQueue({ ...EMPTY_QUEUE, startHistory: state.startHistory });
+    await Promise.all([clearComments(), clearCheckpoints()]);
+    return saveQueue({ ...EMPTY_QUEUE, items: [], workers: [], startHistory: state.startHistory });
   });
 }
 
-/** Chỉ chấp nhận tin nhắn từ đúng tab và đúng bài đang chạy. */
-function isCurrentJob(state: QueueState, itemId: string, tabId: number | undefined): boolean {
-  return state.currentItemId === itemId && tabId !== undefined && tabId === state.workerTabId;
-}
-
-export function onJobStarted(itemId: string, tabId: number | undefined): Promise<void> {
+/** Chạy lại một bài lỗi / bị hủy. Có checkpoint thì chạy tiếp từ chỗ dừng; bình luận cũ được giữ. */
+export function retryItem(itemId: string): Promise<QueueState> {
   return withQueueLock(async () => {
     const state = await loadQueue();
-    if (isCurrentJob(state, itemId, tabId)) await browser.alarms.clear(ALARM_START_TIMEOUT);
+    const item = itemById(state, itemId);
+    if (!item || item.status === 'pending' || item.status === 'running') return state;
+    Object.assign(item, { status: 'pending', error: null, finishedAt: null, retryOnResume: false });
+    if (!ACTIVE.includes(state.status)) {
+      state.status = 'running';
+      state.finishedAt = null;
+      state.message = null;
+      state.area = (await currentScreenArea()) ?? state.area;
+    }
+    await saveQueue(state);
+    if (state.status === 'running') scheduleTick(now());
+    return state;
+  });
+}
+
+export function onJobStarted(
+  itemId: string,
+  tabId: number | undefined,
+): Promise<{ resume: unknown }> {
+  return withQueueLock(async () => {
+    const state = await loadQueue();
+    if (!jobWorker(state, itemId, tabId)) return { resume: null };
+    await browser.alarms.clear(ALARM_START_TIMEOUT + itemId);
+    return { resume: await getCheckpoint(itemId) };
   });
 }
 
@@ -348,18 +449,46 @@ export function onJobComments(
   records: CommentRecord[],
   expectedTotal: number | null,
   tabId: number | undefined,
-): Promise<void> {
+  note: string | null = null,
+): Promise<{ stop: boolean }> {
   return withQueueLock(async () => {
     const state = await loadQueue();
-    if (!isCurrentJob(state, itemId, tabId)) return;
-    const item = current(state)!;
+    const item = jobWorker(state, itemId, tabId) ? itemById(state, itemId) : undefined;
+    if (!item) return { stop: false };
     const { addedRoots, addedReplies } = await addComments(itemId, records);
     item.rootCount += addedRoots;
     item.replyCount += addedReplies;
     if (expectedTotal !== null)
       item.expectedTotal = Math.max(item.expectedTotal ?? 0, expectedTotal);
-    await browser.alarms.clear(ALARM_START_TIMEOUT);
+    if (note) item.note = note;
+    for (const r of records) {
+      if (r.parentId === null && r.createdAt && r.createdAt > (item.newestCommentAt ?? '')) {
+        item.newestCommentAt = r.createdAt;
+      }
+    }
+    const { maxCommentsPerPost } = await getSettings();
+    const stop = maxCommentsPerPost > 0 && item.rootCount + item.replyCount >= maxCommentsPerPost;
+    if (stop) item.limitReached = true;
+    await browser.alarms.clear(ALARM_START_TIMEOUT + itemId);
     await saveQueue(state);
+    return { stop };
+  });
+}
+
+export function onJobCheckpoint(
+  itemId: string,
+  checkpoint: unknown,
+  tabId: number | undefined,
+): Promise<void> {
+  return withQueueLock(async () => {
+    const state = await loadQueue();
+    const item = jobWorker(state, itemId, tabId) ? itemById(state, itemId) : undefined;
+    if (!item) return;
+    await saveCheckpoint(itemId, checkpoint);
+    if (!item.hasCheckpoint) {
+      item.hasCheckpoint = true;
+      await saveQueue(state);
+    }
   });
 }
 
@@ -375,8 +504,9 @@ export function onJobFinished(
 ): Promise<void> {
   return withQueueLock(async () => {
     const state = await loadQueue();
-    if (!isCurrentJob(state, payload.itemId, tabId)) return;
-    const item = current(state)!;
+    const worker = jobWorker(state, payload.itemId, tabId);
+    const item = itemById(state, payload.itemId);
+    if (!worker || !item) return;
     if (payload.expectedTotal !== null) {
       item.expectedTotal = Math.max(item.expectedTotal ?? 0, payload.expectedTotal);
     }
@@ -385,26 +515,38 @@ export function onJobFinished(
 
     if (payload.outcome === 'done') {
       const total = item.rootCount + item.replyCount;
-      await endCurrent(
+      await endJob(
         state,
-        { status: 'done', error: total === 0 ? 'Không tìm thấy bình luận nào' : null },
+        worker,
+        {
+          status: 'done',
+          error: total === 0 ? 'Không tìm thấy bình luận nào' : null,
+          note: payload.message,
+          hasCheckpoint: false,
+        },
         { navigateAway: true, rest: settings },
       );
+      await deleteCheckpoint(item.id);
+      // Chỉ ghi mốc khi đã lấy hết bài — lần sau "chỉ lấy bình luận mới" bắt đầu từ mốc này.
+      if (item.newestCommentAt && !item.limitReached) {
+        await recordNewestCommentTime(item.normalizedUrl, item.newestCommentAt);
+      }
     } else if (stopsQueue) {
       // Giữ nguyên trang để người dùng thấy và xử lý (checkpoint, đăng nhập...).
-      await endCurrent(
+      await endJob(
         state,
+        worker,
         { status: 'error', error: payload.message, retryOnResume: true },
         { navigateAway: false, rest: settings },
       );
+      await endAllJobs(state, { status: 'pending', finishedAt: null }, { navigateAway: true });
       state.status = 'blocked';
       state.message = payload.message;
-      if (state.workerWindowId !== null) {
-        await browser.windows.update(state.workerWindowId, { focused: true }).catch(() => {});
-      }
+      await browser.windows.update(worker.windowId, { focused: true }).catch(() => {});
     } else {
-      await endCurrent(
+      await endJob(
         state,
+        worker,
         { status: 'error', error: payload.message ?? 'Lỗi không xác định' },
         { navigateAway: true, rest: settings },
       );
@@ -417,18 +559,13 @@ export function onJobFinished(
 export function onWorkerTabRemoved(tabId: number): Promise<void> {
   return withQueueLock(async () => {
     const state = await loadQueue();
-    if (tabId !== state.workerTabId) return;
-    state.workerTabId = null;
-    state.workerWindowId = null;
-    await removeTabMode(tabId);
-    if (state.currentItemId) {
-      await endCurrent(
-        state,
-        { status: 'pending', finishedAt: null },
-        { navigateAway: false, rest: null },
-      );
-    }
+    const worker = state.workers.find((w) => w.tabId === tabId);
+    if (!worker) return;
+    const pending: Partial<QueueItem> = { status: 'pending', finishedAt: null };
+    await endJob(state, worker, pending, { navigateAway: false, rest: null });
+    state.workers = state.workers.filter((w) => w !== worker);
     if (state.status === 'running') {
+      await endAllJobs(state, pending, { navigateAway: true });
       state.status = 'paused';
       state.message = 'Cửa sổ thu thập đã bị đóng. Bấm "Tiếp tục" để chạy tiếp.';
     }
@@ -439,18 +576,20 @@ export function onWorkerTabRemoved(tabId: number): Promise<void> {
 
 export function onQueueAlarm(name: string): Promise<void> {
   if (name === ALARM_TICK) return tick();
-  if (name !== ALARM_TIMEOUT && name !== ALARM_START_TIMEOUT) return Promise.resolve();
+  const startTimeout = name.startsWith(ALARM_START_TIMEOUT);
+  if (!startTimeout && !name.startsWith(ALARM_TIMEOUT)) return Promise.resolve();
+  const itemId = name.slice((startTimeout ? ALARM_START_TIMEOUT : ALARM_TIMEOUT).length);
   return withQueueLock(async () => {
     const state = await loadQueue();
-    const item = current(state);
-    if (!item) return;
+    const worker = state.workers.find((w) => w.itemId === itemId);
+    const item = itemById(state, itemId);
+    if (!worker || !item) return;
     const settings = await getSettings();
     const total = item.rootCount + item.replyCount;
-    const error =
-      name === ALARM_START_TIMEOUT
-        ? 'Không tải được trang bài viết (kiểm tra link hoặc kết nối mạng).'
-        : `Quá thời gian ${Math.round(settings.postTimeoutMs / 60000)} phút — đã giữ lại ${total} bình luận thu được.`;
-    await endCurrent(state, { status: 'error', error }, { navigateAway: true, rest: settings });
+    const error = startTimeout
+      ? 'Không tải được trang bài viết (kiểm tra link hoặc kết nối mạng).'
+      : `Quá thời gian ${Math.round(settings.postTimeoutMs / 60000)} phút — đã giữ lại ${total} bình luận thu được.`;
+    await endJob(state, worker, { status: 'error', error }, { navigateAway: true, rest: settings });
     await saveQueue(state);
     if (state.status === 'running') scheduleTick(state.nextRunAt ?? now());
   });
@@ -460,16 +599,15 @@ export function onQueueAlarm(name: string): Promise<void> {
 export function recoverQueue(): Promise<void> {
   return withQueueLock(async () => {
     const state = await loadQueue();
-    if (state.currentItemId && !(await tabExists(state.workerTabId))) {
+    let changed = false;
+    for (const worker of [...state.workers]) {
+      if (await tabExists(worker.tabId)) continue;
       // Trình duyệt đã khởi động lại hoặc tab mất: chạy lại bài này (dữ liệu cũ vẫn được gộp).
-      state.workerTabId = null;
-      state.workerWindowId = null;
-      await endCurrent(
-        state,
-        { status: 'pending', finishedAt: null },
-        { navigateAway: false, rest: null },
-      );
-      await saveQueue(state);
+      const pending: Partial<QueueItem> = { status: 'pending', finishedAt: null };
+      await endJob(state, worker, pending, { navigateAway: false, rest: null });
+      state.workers = state.workers.filter((w) => w !== worker);
+      changed = true;
     }
+    if (changed) await saveQueue(state);
   }).then(() => tick());
 }

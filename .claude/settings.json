@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(pnpm vitest run 2>&1)",
+      "PowerShell(pnpm tsc --noEmit -p . 2>&1)",
+      "PowerShell(Test-Path node_modules; \\(Get-Content package.json -Raw\\))",
+      "PowerShell(pnpm install --frozen-lockfile 2>&1)",
+      "PowerShell(pnpm test 2>&1)",
+      "PowerShell(pnpm compile 2>&1)",
+      "PowerShell(nvm list; Get-ChildItem C:\\\\nvm4w -Directory -ErrorAction SilentlyContinue | Select-Object Name; Get-ChildItem \"$env:LOCALAPPDATA\\\\nvm\" -Directory -ErrorAction SilentlyContinue | Select-Object Name)",
+      "PowerShell(& \"$env:LOCALAPPDATA\\\\nvm\\\\v24.21.0\\\\node.exe\" node_modules\\\\vitest\\\\vitest.mjs run 2>&1 | Select-Object -Last 15)",
+      "PowerShell($env:PATH = \"$env:LOCALAPPDATA\\\\nvm\\\\v24.21.0;$env:PATH\"; node -v; pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 3; pnpm test 2>&1 | Select-Object -Last 15)",
+      "PowerShell($env:PATH = \"$env:LOCALAPPDATA\\\\nvm\\\\v24.21.0;$env:PATH\"; pnpm test 2>&1 | Select-String \"Test Files|Tests|FAIL|Error\"; pnpm compile 2>&1 | Select-Object -Last 5; pnpm lint 2>&1 | Select-Object -Last 5; pnpm build 2>&1 | Select-Object -Last 4)",
+      "PowerShell($env:PATH = \"$env:LOCALAPPDATA\\\\nvm\\\\v24.21.0;$env:PATH\"; pnpm prettier --write src/entrypoints/sidepanel/components/QueuePanel.tsx src/shared/utils/time.ts src/shared/utils/time.test.ts src/core/queue/runner.ts src/core/queue/types.ts src/adapters/facebook/actions.ts src/adapters/facebook/actions.test.ts src/core/storage/settings.ts 2>&1 | Select-Object -Last 10)",
+      "Bash([ -f \"$f\" ])",
+      "Bash(cat /c/Users/tintr/.claude/projects/d--craw-data/memory/MEMORY.md)",
+      "Bash(echo \"- [Keep Chrome extension]\\(keep-chrome-extension.md\\) — chose extension over web/Vercel rewrite for cost and account-safety reasons\")",
+      "Bash(git status *)",
+      "PowerShell($env:PATH = \"$env:LOCALAPPDATA\\\\nvm\\\\v24.21.0;$env:PATH\"; pnpm prettier --write src 2>&1 | Out-Null; pnpm test 2>&1 | Select-String \"Test Files|Tests |FAIL|AssertionError|Expected|Received|✗|×\" | Select-Object -First 30; pnpm compile 2>&1 | Select-Object -Last 8; pnpm lint 2>&1 | Select-Object -Last 8)",
+      "PowerShell($env:PATH = \"$env:LOCALAPPDATA\\\\nvm\\\\v24.21.0;$env:PATH\"; git status --short src; pnpm build 2>&1 | Select-Object -Last 2)",
+      "Bash(git diff *)",
+      "Bash(git config *)",
+      "Bash(git checkout *)",
+      "Bash(echo \"rc=$?\")"
+    ]
+  }
+}

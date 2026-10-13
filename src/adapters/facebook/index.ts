@@ -1,11 +1,11 @@
 import type { PlatformAdapter, PlatformInfo } from '@/adapters/types';
+import { htmlJsonBlocks } from '@/adapters/shared/html-json';
+import { describeFormGraphql, targetMatcher } from '@/adapters/shared/request';
+import { safeParseUrl } from '@/shared/url';
 import { loadAllFacebookComments } from './actions';
 import { detectFacebookBlock } from './block-detector';
-import { parseFacebookInitialHtml } from './initial-html';
 import { FACEBOOK_INTERCEPT_TARGETS } from './intercept-targets';
 import { extractFacebookTotalCount, parseFacebookPayload } from './parser';
-import { describeFacebookRequest, isFacebookGraphqlRequest } from './request';
-import { safeParseUrl } from '@/shared/url';
 import { isFacebookHost, matchFacebookPostUrl, normalizeFacebookUrl } from './url';
 
 export const facebookInfo: PlatformInfo = {
@@ -22,12 +22,14 @@ export const facebookAdapter: PlatformAdapter = {
   id: 'facebook',
   matchUrl: matchFacebookPostUrl,
   normalizeUrl: normalizeFacebookUrl,
-  isTargetRequest: (url) => isFacebookGraphqlRequest(url),
-  describeRequest: describeFacebookRequest,
+  isTargetRequest: targetMatcher(FACEBOOK_INTERCEPT_TARGETS),
+  describeRequest: describeFormGraphql,
   contentScriptMatches: ['https://*.facebook.com/*'],
-  interceptTargets: FACEBOOK_INTERCEPT_TARGETS,
+  supportsFastMode: true,
   parsePayload: parseFacebookPayload,
-  parseInitialHtml: parseFacebookInitialHtml,
+  // Lô comment đầu tiên nằm trong các thẻ <script type="application/json"> của HTML.
+  parseInitialHtml: (doc, ctx) =>
+    htmlJsonBlocks(doc, '"Comment"').flatMap((raw) => parseFacebookPayload(raw, ctx)),
   extractTotalCount: extractFacebookTotalCount,
   loadAllComments: loadAllFacebookComments,
   detectBlock: detectFacebookBlock,

@@ -38,7 +38,7 @@ export function DebugPanel() {
         <input
           type="url"
           required
-          placeholder="Dán link bài viết Facebook"
+          placeholder="Dán link bài viết (Facebook, Instagram, Threads, X)"
           className="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1.5"
           value={url}
           onChange={(e) => setUrl(e.target.value)}

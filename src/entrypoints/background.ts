@@ -13,6 +13,7 @@ import {
   cancelQueue,
   clearQueue,
   getQueueState,
+  onJobCheckpoint,
   onJobComments,
   onJobFinished,
   onJobStarted,
@@ -21,6 +22,7 @@ import {
   pauseQueue,
   recoverQueue,
   resumeQueue,
+  retryItem,
   startQueue,
 } from '@/core/queue/runner';
 import { getSettings, updateSettings } from '@/core/storage/settings';
@@ -57,10 +59,14 @@ export default defineBackground(() => {
     'queue/resume': () => resumeQueue(),
     'queue/cancel': () => cancelQueue(),
     'queue/clear': () => clearQueue(),
+    'queue/retryItem': ({ itemId }) => retryItem(itemId),
     'job/started': ({ itemId }, sender) => onJobStarted(itemId, sender.tab?.id),
-    'job/comments': ({ itemId, records, expectedTotal }, sender) =>
-      onJobComments(itemId, records, expectedTotal, sender.tab?.id),
+    'job/comments': ({ itemId, records, expectedTotal, note }, sender) =>
+      onJobComments(itemId, records, expectedTotal, sender.tab?.id, note ?? null),
+    'job/checkpoint': ({ itemId, state }, sender) => onJobCheckpoint(itemId, state, sender.tab?.id),
     'job/finished': (payload, sender) => onJobFinished(payload, sender.tab?.id),
+    'util/sleep': ({ ms }) =>
+      new Promise<void>((resolve) => setTimeout(resolve, Math.min(Math.max(ms, 0), 60_000))),
   });
 
   browser.tabs.onRemoved.addListener((tabId) => {

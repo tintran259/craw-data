@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CommentRecord } from '@/adapters/types';
-import { mergeComments } from './dedupe';
+import { commentKey, mergeRecord } from './dedupe';
 
 const base: CommentRecord = {
   postUrl: 'u',
@@ -19,16 +19,18 @@ const base: CommentRecord = {
   crawledAt: '2026-01-01T00:00:00.000Z',
 };
 
-describe('mergeComments', () => {
-  it('khử trùng lặp theo platform + commentId và lấp trường thiếu', () => {
-    const map = new Map<string, CommentRecord>();
-    expect(mergeComments(map, [base, { ...base, commentId: 'c2' }])).toBe(2);
-    expect(mergeComments(map, [{ ...base, reactionCount: 5, authorId: '9' }])).toBe(0);
-    expect(map.size).toBe(2);
-    expect(map.get('facebook:c1')).toMatchObject({
-      reactionCount: 5,
-      authorId: '9',
-      content: 'hi 😀',
-    });
+describe('dedupe', () => {
+  it('khóa theo platform + commentId', () => {
+    expect(commentKey(base)).toBe('facebook:c1');
+  });
+
+  it('gộp: giữ bản cũ, lấp các trường còn thiếu từ bản mới', () => {
+    const merged = mergeRecord(base, { ...base, reactionCount: 5, authorId: '9', content: 'khác' });
+    expect(merged).toMatchObject({ reactionCount: 5, authorId: '9', content: 'hi 😀' });
+  });
+
+  it('gộp: bản mới cho biết comment cha thì nhận cả cha lẫn độ sâu', () => {
+    const merged = mergeRecord(base, { ...base, parentId: 'p', depth: 1 });
+    expect(merged).toMatchObject({ parentId: 'p', depth: 1 });
   });
 });

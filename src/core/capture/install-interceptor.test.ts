@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CONTENT_SOURCE, type InterceptorMessage } from '@/core/messaging/page-bridge';
-import { installInterceptor, serializeRequestBody } from './install-interceptor';
+import {
+  installInterceptor,
+  pickRequestHeaders,
+  serializeRequestBody,
+} from './install-interceptor';
 
 const GRAPHQL = 'https://www.facebook.com/api/graphql/';
 
@@ -35,6 +39,7 @@ describe('installInterceptor', () => {
 
     const res = await win.fetch(GRAPHQL, {
       method: 'POST',
+      headers: { 'X-CSRFToken': 'csrf', 'X-IG-App-ID': '936', 'Content-Type': 'text/plain' },
       body: new URLSearchParams({ fb_api_req_friendly_name: 'Q', fb_dtsg: 't' }),
     });
     // Trang vẫn đọc được body bình thường.
@@ -51,7 +56,23 @@ describe('installInterceptor', () => {
       expect(msg.data.responseText).toBe(raw);
       expect(msg.data.requestUrl).toBe(GRAPHQL);
       expect(msg.data.requestBody).toContain('fb_api_req_friendly_name=Q');
+      // Header x-* để chế độ nhanh gửi lại giống trang (không lấy header khác).
+      expect(msg.data.requestHeaders).toEqual({ 'x-csrftoken': 'csrf', 'x-ig-app-id': '936' });
     }
+  });
+
+  it('chỉ giữ header x-* từ object, Headers và mảng cặp', () => {
+    expect(pickRequestHeaders(new Headers({ 'X-ASBD-ID': '1', Accept: '*/*' }))).toEqual({
+      'x-asbd-id': '1',
+    });
+    expect(
+      pickRequestHeaders([
+        ['x-fb-lsd', 'L'],
+        ['cookie', 'c'],
+      ]),
+    ).toEqual({ 'x-fb-lsd': 'L' });
+    expect(pickRequestHeaders({ accept: 'json' })).toBeNull();
+    expect(pickRequestHeaders(undefined)).toBeNull();
   });
 
   it('bỏ qua request không phải mục tiêu và khi bị tắt', async () => {

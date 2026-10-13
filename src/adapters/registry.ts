@@ -1,9 +1,9 @@
 import { facebookAdapter, facebookInfo } from './facebook';
-import { instagramInfo } from './instagram';
-import { threadsInfo } from './threads';
+import { instagramAdapter, instagramInfo } from './instagram';
+import { threadsAdapter, threadsInfo } from './threads';
 import { tiktokInfo } from './tiktok';
 import type { Platform, PlatformAdapter, PlatformInfo } from './types';
-import { xInfo } from './x';
+import { xAdapter, xInfo } from './x';
 
 /**
  * Nơi DUY NHẤT biết đến code riêng của từng nền tảng.
@@ -13,6 +13,9 @@ const PLATFORMS: PlatformInfo[] = [facebookInfo, instagramInfo, threadsInfo, tik
 
 const ADAPTERS: Partial<Record<Platform, PlatformAdapter>> = {
   facebook: facebookAdapter,
+  instagram: instagramAdapter,
+  threads: threadsAdapter,
+  x: xAdapter,
 };
 
 export function detectPlatform(url: string): Platform | null {

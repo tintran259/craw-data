@@ -23,6 +23,7 @@ interface PanelState {
   resumeQueue(): Promise<void>;
   cancelQueue(): Promise<void>;
   clearQueue(): Promise<void>;
+  retryItem(itemId: string): Promise<void>;
   exportData(format: 'xlsx' | 'csv'): Promise<void>;
   startDebug(url: string): Promise<void>;
   stopDebug(): Promise<void>;
@@ -75,6 +76,8 @@ export const usePanelStore = create<PanelState>((set, get) => {
     cancelQueue: () => run(async () => set({ queue: await sendRequest('queue/cancel') })),
     clearQueue: () =>
       run(async () => set({ queue: await sendRequest('queue/clear'), notice: 'Đã xóa dữ liệu.' })),
+    retryItem: (itemId) =>
+      run(async () => set({ queue: await sendRequest('queue/retryItem', { itemId }) })),
     exportData: (format) =>
       run(async () => {
         const total = await exportQueue(get().queue, format);

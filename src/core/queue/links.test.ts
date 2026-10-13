@@ -14,18 +14,22 @@ describe('parseLinkInput', () => {
         'https://example.com/a',
         'https://www.instagram.com/p/abc/',
         'https://www.facebook.com/reel/123',
+        'https://www.tiktok.com/@a/video/1',
+        'https://x.com/someone',
       ].join('\n'),
     );
     expect(result.links.map((l) => [l.normalizedUrl, l.platform, l.supported])).toEqual([
       ['https://www.facebook.com/page/posts/1', 'facebook', true],
-      ['https://www.instagram.com/p/abc/', 'instagram', false],
+      ['https://www.instagram.com/p/abc/', 'instagram', true],
       ['https://www.facebook.com/reel/123', 'facebook', true],
+      ['https://www.tiktok.com/@a/video/1', 'tiktok', false],
     ]);
     expect(result.rejected.map((r) => [r.line, r.reason])).toEqual([
       [4, 'Trùng với dòng 1'],
       [5, 'Không phải link hợp lệ'],
       [6, 'Không phải link bài viết Facebook (cần link /posts/, /reel/, /share/p/, ...)'],
       [7, 'Không nhận diện được mạng xã hội'],
+      [11, 'Không phải link bài viết X (cần link /{tên}/status/{id})'],
     ]);
   });
 });

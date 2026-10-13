@@ -37,7 +37,9 @@ export async function startDebugSession(url: string): Promise<DebugStatus> {
   const trimmed = url.trim();
   const adapter = findAdapterForUrl(trimmed);
   if (!adapter) {
-    throw new Error('Link không hợp lệ hoặc không phải link bài viết Facebook được hỗ trợ.');
+    throw new Error(
+      'Link không hợp lệ hoặc không phải link bài viết được hỗ trợ (Facebook, Instagram, Threads, X).',
+    );
   }
   const target = safeParseUrl(trimmed)?.toString() ?? trimmed;
 

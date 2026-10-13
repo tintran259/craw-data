@@ -1,6 +1,19 @@
-import { detectPlatform, findAdapterForUrl, getPlatformLabel } from '@/adapters/registry';
+import {
+  detectPlatform,
+  findAdapterForUrl,
+  getAdapter,
+  getPlatformLabel,
+} from '@/adapters/registry';
 import type { Platform } from '@/adapters/types';
 import { safeParseUrl } from '@/shared/url';
+
+/** Gợi ý dạng link bài viết khi người dùng dán link trang cá nhân / trang chủ. */
+const POST_LINK_HINT: Partial<Record<Platform, string>> = {
+  facebook: '/posts/, /reel/, /share/p/, ...',
+  instagram: '/p/{mã}, /reel/{mã}, /share/{mã}',
+  threads: '/@{tên}/post/{mã}, /share/{mã}',
+  x: '/{tên}/status/{id}',
+};
 
 export interface ParsedLink {
   inputUrl: string;
@@ -40,11 +53,11 @@ export function parseLinkInput(text: string): LinkParseResult {
       rejected.push({ line: lineNo, text: line, reason: 'Không nhận diện được mạng xã hội' });
       return;
     }
-    if (!adapter && platform === 'facebook') {
+    if (!adapter && getAdapter(platform)) {
       rejected.push({
         line: lineNo,
         text: line,
-        reason: 'Không phải link bài viết Facebook (cần link /posts/, /reel/, /share/p/, ...)',
+        reason: `Không phải link bài viết ${getPlatformLabel(platform)} (cần link ${POST_LINK_HINT[platform] ?? 'bài viết'})`,
       });
       return;
     }
